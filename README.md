@@ -57,3 +57,47 @@ L'activation de l'environnement n'est pas nécessaire avec les commandes ci-dess
 La cadence dépend du PC et du flux : chaque image lue est analysée, sans saut
 volontaire d'images. L'alerte correspond à la présence d'une personne, sans
 distinction entre membre de l'équipe et intrus.
+
+## Alertes MQTT
+
+La connexion utilise Paho en arrière-plan. Une alerte est envoyée sur
+`sentinel/alerts` uniquement à l'apparition d'une personne. Une image sans
+personne réarme l'envoi. Une autre personne entrant alors que quelqu'un est
+déjà visible ne déclenche pas d'alerte supplémentaire.
+
+Dans le terminal PowerShell qui lancera le script :
+
+```powershell
+$env:MQTT_HOST = "adresse-du-broker"
+$env:MQTT_PORT = "8883"
+$env:MQTT_USER = "api"
+$mqttCredential = Get-Credential -UserName "api" -Message "Saisir le mot de passe MQTT Sentinel-X"
+$env:MQTT_PASSWORD = $mqttCredential.GetNetworkCredential().Password
+.\.venv\Scripts\python.exe .\esp32_stream.py
+```
+
+Saisir le mot de passe fourni pour le compte `api` dans la fenêtre de saisie.
+Il reste hors du code et de l'historique des commandes. Les variables concernent
+uniquement ce terminal et les processus qu'il lance.
+
+Le port `8883` active TLS avec vérification du certificat et du nom du broker.
+Si le broker utilise une CA privée, définir aussi `MQTT_CA_CERT` avec le chemin
+de son certificat CA au format PEM. Le port `1883` convient à un broker de test
+sans TLS. L'hôte par défaut est `localhost` ; renseigner le véritable broker.
+
+Le JSON envoyé contient exactement les quatre champs suivants :
+
+```json
+{
+    "code": "HUMAN_DETECTED",
+    "source": "yolo",
+    "severity": "critical",
+    "message": "Personne detectee"
+}
+```
+
+Si MQTT est indisponible, YOLO et la vidéo continuent. L'alerte de cette apparition
+est ignorée si le client n'est pas connecté ; elle n'est pas rejouée lors de la
+reconnexion. La publication utilise QoS 1, sans rétention : le terminal confirme
+l'accusé de réception du broker. QoS 1 peut retransmettre un message après une
+coupure réseau, même si le script ne déclenche qu'un envoi par apparition.
