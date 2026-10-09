@@ -1,5 +1,5 @@
 
-"""Sentinel-X : détection de personnes avec ESP32-CAM et alertes MQTT."""
+"""Sentinel-X : detection de personnes ESP32-CAM et alertes MQTT."""
 
 import json
 import os
@@ -9,16 +9,17 @@ import cv2
 import paho.mqtt.client as mqtt
 from ultralytics import YOLO
 
+
 # =========================
 # CONFIGURATION CAMERA
 # =========================
 
 USE_WEBCAM = False
 WEBCAM_INDEX = 1
-
-STREAM_URL = "http://172.20.10.13:81/stream"
+STREAM_URL = "http://10.246.140.66:81/stream"
 
 WINDOW_NAME = "Sentinel-X - ESP32-CAM (Q pour quitter)"
+
 
 # =========================
 # CONFIGURATION YOLO
@@ -29,15 +30,16 @@ CONFIDENCE_THRESHOLD = 0.5
 IMAGE_SIZE = 320
 PERSON_CLASS_ID = 0
 
-# Evite de traiter chaque image si le PC est surcharge.
+# Intervalle minimum entre deux analyses YOLO.
 DETECTION_INTERVAL = 0.15
+
 
 # =========================
 # CONFIGURATION MQTT
 # =========================
 
 MQTT_HOST = os.getenv("MQTT_HOST", "localhost")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USER = os.getenv("MQTT_USER", "api")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD")
 MQTT_CA_CERT = os.getenv("MQTT_CA_CERT")
@@ -67,20 +69,20 @@ def on_mqtt_publish(client, userdata, mid, reason_code, properties):
     if reason_code.is_failure:
         print(f"MQTT : publication refusee ({reason_code}).")
     else:
-        print("MQTT : alerte publiee sur sentinel/alerts.")
+        print(f"MQTT : alerte publiee sur {MQTT_TOPIC}.")
 
 
 def start_mqtt():
-    if not MQTT_PASSWORD:
-        print("MQTT desactive : aucun mot de passe configure.")
-        return None
-
     client = None
 
     try:
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-        client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
 
+        # Authentification facultative pour le broker local.
+        if MQTT_PASSWORD:
+            client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+
+        # TLS pour le broker securise.
         if MQTT_PORT == 8883:
             client.tls_set(ca_certs=MQTT_CA_CERT)
 
@@ -94,15 +96,19 @@ def start_mqtt():
         client.connect_async(MQTT_HOST, MQTT_PORT, keepalive=60)
         client.loop_start()
 
+        print(f"MQTT : connexion vers {MQTT_HOST}:{MQTT_PORT}...")
+
         return client
 
     except Exception as error:
         print(f"MQTT indisponible : {error}")
+
         if client is not None:
             try:
                 client.loop_stop()
             except Exception:
                 pass
+
         return None
 
 
@@ -143,11 +149,13 @@ def detect_people(model, frame):
         if result.boxes is None:
             continue
 
-        for box in result.boxes:
+        for detected_box in result.boxes:
             detected = True
 
-            x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
-            confidence = float(box.conf[0])
+            x1, y1, x2, y2 = map(
+                int, detected_box.xyxy[0].tolist()
+            )
+            confidence = float(detected_box.conf[0])
 
             cv2.rectangle(
                 frame,
@@ -181,6 +189,22 @@ def detect_people(model, frame):
     return detected, frame
 
 
+def open_camera():
+    """Ouvre la webcam ou le flux ESP32-CAM."""
+
+    if USE_WEBCAM:
+        return cv2.VideoCapture(WEBCAM_INDEX, cv2.CAP_DSHOW)
+
+    return cv2.VideoCapture(
+        STREAM_URL,
+        cv2.CAP_FFMPEG,
+        [
+            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
+            cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000,
+        ],
+    )
+
+
 def main():
     print("Demarrage Sentinel-X...")
     print(f"Chargement YOLO : {MODEL_PATH}")
@@ -188,20 +212,9 @@ def main():
     model = YOLO(MODEL_PATH)
 
     source = WEBCAM_INDEX if USE_WEBCAM else STREAM_URL
-
     print(f"Connexion camera : {source}")
 
-    if USE_WEBCAM:
-        capture = cv2.VideoCapture(source, cv2.CAP_DSHOW)
-    else:
-        capture = cv2.VideoCapture(
-            source,
-            cv2.CAP_FFMPEG,
-            [
-                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
-                cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000,
-            ],
-        )
+    capture = open_camera()
 
     if not capture.isOpened():
         raise RuntimeError(
@@ -209,7 +222,6 @@ def main():
             "Verifier Wi-Fi et STREAM_URL."
         )
 
-    # Peut reduire la file d'attente selon le backend OpenCV.
     capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     mqtt_client = None
@@ -234,30 +246,22 @@ def main():
                 capture.release()
                 time.sleep(2)
 
-                if USE_WEBCAM:
-                    capture = cv2.VideoCapture(
-                        WEBCAM_INDEX, cv2.CAP_DSHOW
-                    )
-                else:
-                    capture = cv2.VideoCapture(
-                        STREAM_URL,
-                        cv2.CAP_FFMPEG,
-                        [
-                            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
-                            cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000,
-                        ],
-                    )
+                capture = open_camera()
 
                 if not capture.isOpened():
                     print("Camera toujours indisponible.")
                     break
 
+                previous_detection = False
+                last_annotated_frame = None
                 continue
 
             now = time.monotonic()
 
             if now - last_detection_time >= DETECTION_INTERVAL:
-                detected, annotated_frame = detect_people(model, frame)
+                detected, annotated_frame = detect_people(
+                    model, frame.copy()
+                )
 
                 if detected and not previous_detection:
                     print("ALERTE : personne detectee !")
@@ -267,14 +271,12 @@ def main():
                 last_detection_time = now
                 last_annotated_frame = annotated_frame
 
-            # Affiche toujours l'image la plus recente.
-            # Les annotations sont actualisees lors des detections.
+            # Affiche l'image avec les annotations les plus recentes.
+            display_frame = frame
+
             if last_annotated_frame is not None:
-                display_frame = frame.copy()
                 if now - last_detection_time < 0.1:
                     display_frame = last_annotated_frame
-            else:
-                display_frame = frame
 
             cv2.imshow(WINDOW_NAME, display_frame)
 
